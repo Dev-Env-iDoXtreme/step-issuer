@@ -1,8 +1,7 @@
 apiVersion: certmanager.step.sm/v1beta1
-kind: StepIssuer
+kind: StepClusterIssuer
 metadata:
-  name: step-issuer
-  namespace: default
+  name: step-cluster-issuer
 spec:
   # The CA URL.
   url: https://step-certificates.default.svc.cluster.local
