@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"sync"
 
-	certmanager "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1alpha1"
+	certmanager "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	capi "github.com/smallstep/certificates/api"
 	"github.com/smallstep/certificates/ca"
 	api "github.com/smallstep/step-issuer/api/v1beta1"
@@ -20,24 +20,49 @@ var collection = new(sync.Map)
 // Step implements a Step JWK provisioners in charge of signing certificate
 // requests using step certificates.
 type Step struct {
-	uid         types.UID
+	name        string
+	caBundle    []byte
 	provisioner *ca.Provisioner
 }
 
-// New returns a new Step provisioner, configured with the information in the
+// NewFromStepIssuer returns a new Step provisioner, configured with the information in the
 // given issuer.
-func New(iss *api.StepIssuer, password []byte) (*Step, error) {
-	var options []ca.ClientOption
-	if len(iss.Spec.CABundle) > 0 {
-		options = append(options, ca.WithCABundle(iss.Spec.CABundle))
+func NewFromStepIssuer(iss *api.StepIssuer, password []byte) (*Step, error) {
+	options := []ca.ClientOption{
+		ca.WithCABundle(iss.Spec.CABundle),
 	}
+
 	provisioner, err := ca.NewProvisioner(iss.Spec.Provisioner.Name, iss.Spec.Provisioner.KeyID, iss.Spec.URL, password, options...)
 	if err != nil {
 		return nil, err
 	}
-	return &Step{
+
+	p := &Step{
+		name:        iss.Name + "." + iss.Namespace,
+		caBundle:    iss.Spec.CABundle,
 		provisioner: provisioner,
-	}, nil
+	}
+
+	return p, nil
+}
+
+func NewFromStepClusterIssuer(iss *api.StepClusterIssuer, password []byte) (*Step, error) {
+	options := []ca.ClientOption{
+		ca.WithCABundle(iss.Spec.CABundle),
+	}
+
+	provisioner, err := ca.NewProvisioner(iss.Spec.Provisioner.Name, iss.Spec.Provisioner.KeyID, iss.Spec.URL, password, options...)
+	if err != nil {
+		return nil, err
+	}
+
+	p := &Step{
+		name:        iss.Name + "." + iss.Namespace,
+		caBundle:    iss.Spec.CABundle,
+		provisioner: provisioner,
+	}
+
+	return p, nil
 }
 
 // Load returns a Step provisioner by NamespacedName.
@@ -57,38 +82,28 @@ func Store(namespacedName types.NamespacedName, provisioner *Step) {
 
 // Sign sends the certificate requests to the Step CA and returns the signed
 // certificate.
-func (s *Step) Sign(ctx context.Context, cr *certmanager.CertificateRequest) ([]byte, []byte, error) {
-	// Get root certificate(s)
-	roots, err := s.provisioner.Roots()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Encode root certificates
-	var caPem []byte
-	for _, root := range roots.Certificates {
-		b, err := encodeX509(root.Certificate)
-		if err != nil {
-			return nil, nil, err
-		}
-		caPem = append(caPem, b...)
-	}
-
+func (s *Step) Sign(_ context.Context, cr *certmanager.CertificateRequest) ([]byte, []byte, error) {
 	// decode and check certificate request
-	csr, err := decodeCSR(cr.Spec.CSRPEM)
+	csr, err := decodeCSR(cr.Spec.Request)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var sans []string
-	for _, dns := range csr.DNSNames {
-		sans = append(sans, dns)
-	}
+	sans := append([]string{}, csr.DNSNames...)
+	sans = append(sans, csr.EmailAddresses...)
 	for _, ip := range csr.IPAddresses {
 		sans = append(sans, ip.String())
 	}
+	for _, u := range csr.URIs {
+		sans = append(sans, u.String())
+	}
 
-	token, err := s.provisioner.Token(csr.Subject.CommonName, sans...)
+	subject := csr.Subject.CommonName
+	if subject == "" {
+		subject = generateSubject(sans)
+	}
+
+	token, err := s.provisioner.Token(subject, sans...)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -110,17 +125,11 @@ func (s *Step) Sign(ctx context.Context, cr *certmanager.CertificateRequest) ([]
 	}
 
 	// Encode server certificate with the intermediate
-	certPem, err := encodeX509(resp.ServerPEM.Certificate)
+	chainPem, err := encodeX509(resp.CertChainPEM...)
 	if err != nil {
 		return nil, nil, err
 	}
-	chainPem, err := encodeX509(resp.CaPEM.Certificate)
-	if err != nil {
-		return nil, nil, err
-	}
-	certPem = append(certPem, chainPem...)
-
-	return certPem, caPem, nil
+	return chainPem, s.caBundle, nil
 }
 
 // decodeCSR decodes a certificate request in PEM format and returns the
@@ -134,20 +143,38 @@ func decodeCSR(data []byte) (*x509.CertificateRequest, error) {
 	}
 	csr, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing certificate request: %v", err)
+		return nil, fmt.Errorf("error parsing certificate request: %w", err)
 	}
 	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("error checking certificate request signature: %v", err)
+		return nil, fmt.Errorf("error checking certificate request signature: %w", err)
 	}
 	return csr, nil
 }
 
-// encodeX509 will encode a *x509.Certificate into PEM format.
-func encodeX509(cert *x509.Certificate) ([]byte, error) {
-	caPem := bytes.NewBuffer([]byte{})
-	err := pem.Encode(caPem, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
-	if err != nil {
-		return nil, err
+// encodeX509 will encode a certificate into PEM format.
+func encodeX509(certs ...capi.Certificate) ([]byte, error) {
+	certPem := bytes.NewBuffer([]byte{})
+	for _, cert := range certs {
+		err := pem.Encode(certPem, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+		if err != nil {
+			return nil, err
+		}
 	}
-	return caPem.Bytes(), nil
+	return certPem.Bytes(), nil
+}
+
+// generateSubject returns the first SAN that is not 127.0.0.1 or localhost. The
+// CSRs generated by the Certificate resource have always those SANs. If no SANs
+// are available `step-issuer-certificate` will be used as a subject is always
+// required.
+func generateSubject(sans []string) string {
+	if len(sans) == 0 {
+		return "step-issuer-certificate"
+	}
+	for _, s := range sans {
+		if s != "127.0.0.1" && s != "localhost" {
+			return s
+		}
+	}
+	return sans[0]
 }
