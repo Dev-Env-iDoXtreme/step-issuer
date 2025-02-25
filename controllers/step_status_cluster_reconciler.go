@@ -10,21 +10,21 @@ import (
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type stepStatusReconciler struct {
-	*StepIssuerReconciler
-	issuer *api.StepIssuer
+type stepStatusClusterReconciler struct {
+	*StepClusterIssuerReconciler
+	issuer *api.StepClusterIssuer
 	logger logr.Logger
 }
 
-func newStepStatusReconciler(r *StepIssuerReconciler, iss *api.StepIssuer, log logr.Logger) *stepStatusReconciler {
-	return &stepStatusReconciler{
-		StepIssuerReconciler: r,
-		issuer:               iss,
-		logger:               log,
+func newStepStatusClusterReconciler(r *StepClusterIssuerReconciler, iss *api.StepClusterIssuer, log logr.Logger) *stepStatusClusterReconciler {
+	return &stepStatusClusterReconciler{
+		StepClusterIssuerReconciler: r,
+		issuer:                      iss,
+		logger:                      log,
 	}
 }
 
-func (r *stepStatusReconciler) Update(ctx context.Context, status api.ConditionStatus, reason, message string, args ...interface{}) error {
+func (r *stepStatusClusterReconciler) Update(ctx context.Context, status api.ConditionStatus, reason, message string, args ...interface{}) error {
 	completeMessage := fmt.Sprintf(message, args...)
 	r.setCondition(status, reason, completeMessage)
 
@@ -38,13 +38,13 @@ func (r *stepStatusReconciler) Update(ctx context.Context, status api.ConditionS
 	return r.Client.Status().Update(ctx, r.issuer)
 }
 
-func (r *stepStatusReconciler) UpdateNoError(ctx context.Context, status api.ConditionStatus, reason, message string, args ...interface{}) {
+func (r *stepStatusClusterReconciler) UpdateNoError(ctx context.Context, status api.ConditionStatus, reason, message string, args ...interface{}) {
 	if err := r.Update(ctx, status, reason, message, args...); err != nil {
 		r.logger.Error(err, "failed to update", "status", status, "reason", reason)
 	}
 }
 
-// setCondition will set a 'condition' on the given api.StepIssuer resource.
+// setCondition will set a 'condition' on the given api.StepClusterIssuer resource.
 //
 // - If no condition of the same type already exists, the condition will be
 // inserted with the LastTransitionTime set to the current time.
@@ -53,9 +53,9 @@ func (r *stepStatusReconciler) UpdateNoError(ctx context.Context, status api.Con
 // - If a condition of the same type and different state already exists, the
 // condition will be updated and the LastTransitionTime set to the current
 // time.
-func (r *stepStatusReconciler) setCondition(status api.ConditionStatus, reason, message string) {
+func (r *stepStatusClusterReconciler) setCondition(status api.ConditionStatus, reason, message string) {
 	now := meta.NewTime(r.Clock.Now())
-	c := api.StepIssuerCondition{
+	c := api.StepClusterIssuerCondition{
 		Type:               api.ConditionReady,
 		Status:             status,
 		Reason:             reason,
